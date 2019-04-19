@@ -5,8 +5,8 @@ import tensorflow as tf
 
 class Config():
     max_len = 6
-    epoch = 100
-    sample_per_epoch = 1000
+    epoch = 10
+    sample_per_epoch = 20000
     batch_size = 32
     learning_rate = 0.001
     poetry_file = 'data/poetry.txt'
@@ -39,6 +39,7 @@ class TensorPoems():
         char_count = la.text.word_count(self.Config.poem)
         [char_count.pop(i) for i in la.text.word_low_freq(char_count, 2)]
         self.Config.char_index = la.text.word_to_index(char_count)
+        self.Config.char_index[' '] = 0
         self.Config.index_char = {j:i for i,j in self.Config.char_index.items()}
         if trainable:
             pbar = tf.keras.utils.Progbar(len(self.Config.poem), stateful_metrics=['sample nums'])
@@ -50,7 +51,7 @@ class TensorPoems():
                     sample_nums = sample_nums+j+1
                     pbar.update(r+1, values=[('sample nums', sample_nums)])
     
-    def generate_sample_result(self, epoch, logs):
+    def _generate_sample_result(self, epoch, logs):
         '''训练过程中，每4个epoch打印出当前的学习情况'''
         if epoch % 4 == 0:
             with open(self.Config.train_log_file, 'a+',encoding='utf-8') as f:
@@ -63,14 +64,10 @@ class TensorPoems():
                     f.write(generate+'\n')
     
     def build_model(self):
-        def embedding(shape, dtype=tf.float32):
-            return tf.cast(tf.linalg.diag([1]*shape[0]), dtype=dtype)
         input_tensor = tf.keras.Input(shape=(self.Config.max_len,))
-        x = tf.keras.layers.Embedding(len(self.Config.char_index), len(self.Config.char_index), embedding, trainable=False)(input_tensor)
-        x = tf.keras.layers.LSTM(512, return_sequences=True)(x)
-        x = tf.keras.layers.Dropout(0.6)(x)
-        x = tf.keras.layers.LSTM(256)(x)
-        x = tf.keras.layers.Dropout(0.6)(x)
+        x = tf.keras.layers.Embedding(len(self.Config.char_index), 300)(input_tensor)
+        x = tf.keras.layers.Bidirectional(tf.keras.layers.GRU(512, return_sequences=True))(x)
+        x = tf.keras.layers.GRU(216)(x)
         dense = tf.keras.layers.Dense(len(self.Config.char_index), activation='softmax')(x)
         self.model = tf.keras.Model(input_tensor, dense)
         self.model.compile(loss=tf.losses.CategoricalCrossentropy(),
@@ -82,14 +79,14 @@ class TensorPoems():
             parsed_line = tf.io.decode_csv(line, [[0]]*(self.Config.max_len+1), field_delim=',')
             label = parsed_line[-1]
             del parsed_line[-1]
-            return parsed_line, tf.reshape(label, [-1])
+            return parsed_line, tf.one_hot(label, len(self.Config.char_index))
         AUTOTUNE = tf.data.experimental.AUTOTUNE
-        dataset = tf.data.TextLineDataset(self.Config.sample_file).map(
-            to_tensor, AUTOTUNE).shuffle(self.Config.batch_size*10).batch(self.Config.batch_size).prefetch(AUTOTUNE)
+        dataset = (tf.data.TextLineDataset(self.Config.sample_file).map(to_tensor, AUTOTUNE)
+                   .shuffle(self.Config.batch_size*10).batch(self.Config.batch_size).prefetch(AUTOTUNE))
         self.build_model()
         self.model.fit(dataset, epochs=self.Config.epoch, steps_per_epoch=self.Config.sample_per_epoch//self.Config.batch_size,
-                       callbacks=[tf.keras.callbacks.ModelCheckpoint(self.Config.model_file, monitor='train_loss', verbose=0, save_best_only=True, save_weights_only=False),
-                                  tf.keras.callbacks.LambdaCallback(on_epoch_end=self.generate_sample_result)])
+                       callbacks=[tf.keras.callbacks.LambdaCallback(on_epoch_end=self._generate_sample_result)])
+        self.model.save(self.Config.model_file)
     
     def predict(self, text=None, hide=False, temperature=1):
         assert isinstance(text, str) or text is None, '{} length should be str or None.'.format(text)
@@ -98,8 +95,8 @@ class TensorPoems():
             sentence = rand_poem[:self.Config.max_len]
             generate = str(sentence)
             generate += self._predict_func(sentence, length=24-self.Config.max_len, temperature=temperature)
-        elif hide:
-            sentence = rand_poem[len(text)-self.Config.max_len:]+text
+        elif not hide:
+            sentence = rand_poem[len(text)-self.Config.max_len:]+text if len(text)<self.Config.max_len else text[-self.Config.max_len:]
             generate = str(text)
             generate += self._predict_func(sentence, length=24-len(text), temperature=temperature)
         else:
@@ -108,7 +105,8 @@ class TensorPoems():
             for i in range(len(text)):
                 generate += text[i]
                 generate += self._predict_func(sentence, 5, temperature)
-                sentence = generate[1:]+text[i+1]
+                if i!= len(text)-1:
+                    sentence = generate[1-self.Config.max_len:]+text[i+1]
         return generate
     
     def _predict_func(self, sentence, length, temperature):
@@ -134,5 +132,3 @@ class TensorPoems():
     
 if __name__ == '__main__':
     tp = TensorPoems()
-#     tp.make_sample()
-#     tp.train()
