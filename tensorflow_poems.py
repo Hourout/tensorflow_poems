@@ -10,8 +10,9 @@ class Config():
     batch_size = 32
     learning_rate = 0.001
     poetry_file = 'data/poetry.txt'
-    model_file = 'poetry_model.h5'
+    model_file = 'data/poetry_model.h5'
     sample_file = 'data/sample.csv'
+    train_log_file = 'data/train_log.txt'
     char_index = None
     index_char = None if char_index is None else {j:i for i,j in char_index.items()}
     poem = None
@@ -51,17 +52,15 @@ class TensorPoems():
     
     def generate_sample_result(self, epoch, logs):
         '''训练过程中，每4个epoch打印出当前的学习情况'''
-        if epoch % 4 != 0:
-            return
-        with open('out/out.txt', 'a',encoding='utf-8') as f:
-            f.write('==================Epoch {}=====================\n'.format(epoch))
-        print("\n==================Epoch {}=====================".format(epoch))
-        for diversity in [0.7, 1.0, 1.3]:
-            print("------------Diversity {}--------------".format(diversity))
-            generate = self.predict_random(temperature=diversity)
-            print(generate)
-            with open('out/out.txt', 'a',encoding='utf-8') as f:
-                f.write(generate+'\n')
+        if epoch % 4 == 0:
+            with open(self.Config.train_log_file, 'a+',encoding='utf-8') as f:
+                f.write('==================Epoch {}=====================\n'.format(epoch))
+                print("\n==================Epoch {}=====================".format(epoch))
+                for diversity in [0.7, 1.0, 1.3]:
+                    print("------------Diversity {}--------------".format(diversity))
+                    generate = self.predict(temperature=diversity)
+                    print(generate)
+                    f.write(generate+'\n')
     
     def build_model(self):
         def embedding(shape, dtype=tf.float32):
@@ -92,78 +91,27 @@ class TensorPoems():
                        callbacks=[tf.keras.callbacks.ModelCheckpoint(self.Config.model_file, monitor='train_loss', verbose=0, save_best_only=True, save_weights_only=False),
                                   tf.keras.callbacks.LambdaCallback(on_epoch_end=self.generate_sample_result)])
     
-    def predict_random(self, temperature=1):
-        '''随机从库中选取一句开头的诗句，生成五言绝句'''
-        sentence = self.Config.poem[np.random.choice(len(self.Config.poem), 1)[0]][:self.Config.max_len]
-        generate = self.predict_sen(sentence, temperature=temperature)
-        return generate
-
-    def predict_first(self, char, temperature =1):
-        '''根据给出的首个文字，生成五言绝句'''
-        index = random.randint(0, self.poems_num)
-        #选取随机一首诗的最后max_len字符+给出的首个文字作为初始输入
-        sentence = self.poems[index][1-self.Config.max_len:] + char
-        generate = str(char)
-#         print('first line = ',sentence)
-        # 直接预测后面23个字符
-        generate += self._preds(sentence,length=23,temperature=temperature)
-        return generate
-    
-    def predict_sen(self, text, temperature =1):
-        '''根据给出的前max_len个字，生成诗句'''
-        '''此例中，即根据给出的第一句诗句（含逗号），来生成古诗'''
-        assert self.Config.max_len==len(text), 'length should not be equal {}.'.format(self.Config.max_len)
-        generate = str(text)
-        generate += self._preds(text, length=24-self.Config.max_len, temperature=temperature)
+    def predict(self, text=None, hide=False, temperature=1):
+        assert isinstance(text, str) or text is None, '{} length should be str or None.'.format(text)
+        rand_poem = self.Config.poem[np.random.choice(len(self.Config.poem), 1)[0]]
+        if text is None:
+            sentence = rand_poem[:self.Config.max_len]
+            generate = str(sentence)
+            generate += self._predict_func(sentence, length=24-self.Config.max_len, temperature=temperature)
+        elif hide:
+            sentence = rand_poem[len(text)-self.Config.max_len:]+text
+            generate = str(text)
+            generate += self._predict_func(sentence, length=24-len(text), temperature=temperature)
+        else:
+            sentence = rand_poem[1-self.Config.max_len:]+text[0]
+            generate = ''
+            for i in range(len(text)):
+                generate += text[i]
+                generate += self._predict_func(sentence, 5, temperature)
+                sentence = generate[1:]+text[i+1]
         return generate
     
-    def predict_hide(self, text,temperature = 1):
-        '''根据给4个字，生成藏头诗五言绝句'''
-        if len(text)!=4:
-            print('藏头诗的输入必须是4个字！')
-            return
-        
-        index = random.randint(0, self.poems_num)
-        #选取随机一首诗的最后max_len字符+给出的首个文字作为初始输入
-        sentence = self.poems[index][1-self.config.max_len:] + text[0]
-        generate = str(text[0])
-        print('first line = ',sentence)
-        
-        for i in range(5):
-            next_char = self._pred(sentence,temperature)           
-            sentence = sentence[1:] + next_char
-            generate+= next_char
-        for i in range(3):
-            generate += text[i+1]
-            sentence = sentence[1:] + text[i+1]
-            for i in range(5):
-                next_char = self._pred(sentence,temperature)           
-                sentence = sentence[1:] + next_char
-                generate+= next_char
-        return generate
-    
-    def _preds(self, sentence, length=23, temperature=1):
-        '''
-        sentence:预测输入值
-        lenth:预测出的字符串长度
-        供类内部调用，输入max_len长度字符串，返回length长度的预测值字符串
-        '''
-        generate = ''
-        for i in range(length):
-            pred = self._pred(sentence, temperature)
-            generate += pred
-            sentence = sentence[1:]+pred
-        return generate
-        
-    def _pred(self, sentence, temperature=1):
-        '''内部使用方法，根据一串输入，返回单个预测字符'''
-        x_pred = np.array(la.text.word_index_sequence([list(sentence)], self.Config.char_index))
-        preds = self.model.predict(x_pred, verbose=0)[0]
-        next_index = self.sample(preds, temperature=temperature)
-        next_char = self.Config.index_char[next_index]
-        return next_char
-    
-    def sample(self, preds, temperature=1.0):
+    def _predict_func(self, sentence, length, temperature):
         '''
         当temperature=1.0时，模型输出正常
         当temperature=0.5时，模型输出比较open
@@ -171,11 +119,18 @@ class TensorPoems():
         在训练的过程中可以看到temperature不同，结果也不同
         就是一个概率分布变换的问题，保守的时候概率大的值变得更大，选择的可能性也更大
         '''
-        prob = np.asarray(preds).astype('float64')
-        prob = np.power(prob, 1./temperature)
-        prob = prob / np.sum(prob)
-        prob = np.random.choice(range(len(prob)), 1, p=prob)
-        return int(prob.squeeze())
+        generate = ''
+        char = sentence
+        for i in range(length):
+            pred = np.array(la.text.word_index_sequence([list(char)], self.Config.char_index))
+            pred = self.model.predict(pred, verbose=0)[0]
+            pred = np.power(pred, 1./temperature)
+            pred = pred / np.sum(pred)
+            pred = np.random.choice(range(len(pred)), 1, p=pred)[0]
+            pred = self.Config.index_char[pred]
+            generate += pred
+            char = char[1:]+pred
+        return generate
     
 if __name__ == '__main__':
     tp = TensorPoems()
